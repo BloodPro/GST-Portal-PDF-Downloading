@@ -1,196 +1,158 @@
-import time
 import os
+import time
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from openpyxl import Workbook, load_workbook
+import pandas as pd
 from datetime import datetime
 
-# ---------------- Logging Functions ----------------
-def init_log_file(folder):
-    log_path = os.path.join(folder, "GST_Download_Log.xlsx")
-    if not os.path.exists(log_path):
-        wb = Workbook()
-        ws = wb.active
-        ws.append(["Timestamp", "Financial Year", "Action", "Status"])
-        wb.save(log_path)
-    return log_path
-
-def log_action(folder, fy, action, status):
-    log_path = init_log_file(folder)
-    wb = load_workbook(log_path)
-    ws = wb.active
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ws.append([timestamp, fy, action, status])
-    wb.save(log_path)
-    print(f"[{timestamp}] ({fy}) {action} → {status}")
-
-# ---------------- Helper Functions ----------------
-def safe_click(driver, folder, fy, description, xpath, wait_time=20):
-    """Wait for element to be clickable and click it."""
-    try:
-        WebDriverWait(driver, wait_time).until(
-            EC.element_to_be_clickable((By.XPATH, xpath))
-        ).click()
-        time.sleep(2)
-        log_action(folder, fy, description, "Success")
-        return True
-    except Exception as e:
-        log_action(folder, fy, description, f"Fail ({e})")
-        return False
-
-def wait_for_page_load(driver, folder, fy, description, timeout=20):
-    """Wait until document.readyState is complete."""
-    try:
-        WebDriverWait(driver, timeout).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
-        )
-        log_action(folder, fy, description, "Success")
-    except Exception as e:
-        log_action(folder, fy, description, f"Fail ({e})")
-
-def wait_for_url_change(driver, old_url, folder, fy, description, timeout=20):
-    """Wait for URL to change after an action."""
-    try:
-        WebDriverWait(driver, timeout).until(lambda d: d.current_url != old_url)
-        log_action(folder, fy, description, "Success")
-        return True
-    except Exception as e:
-        log_action(folder, fy, description, f"Fail ({e})")
-        return False
-
-# ---------------- GUI ----------------
+# ================== GUI ================== #
 class GSTDownloaderGUI:
     def __init__(self, master):
         self.master = master
         master.title("GST PDF Downloader")
 
         # Username
-        tk.Label(master, text="Username").grid(row=0, column=0, sticky="e")
-        self.username_entry = tk.Entry(master, width=30)
-        self.username_entry.grid(row=0, column=1)
+        tk.Label(master, text="Username").grid(row=0, column=0, sticky="w")
+        self.username_entry = tk.Entry(master, width=40)
+        self.username_entry.grid(row=0, column=1, pady=2)
 
         # Password
-        tk.Label(master, text="Password").grid(row=1, column=0, sticky="e")
-        self.password_entry = tk.Entry(master, width=30, show="*")
-        self.password_entry.grid(row=1, column=1)
+        tk.Label(master, text="Password").grid(row=1, column=0, sticky="w")
+        self.password_entry = tk.Entry(master, width=40, show="*")
+        self.password_entry.grid(row=1, column=1, pady=2)
 
-        # Destination folder
-        tk.Label(master, text="Destination Folder").grid(row=2, column=0, sticky="e")
-        self.folder_path = tk.StringVar()
-        tk.Entry(master, textvariable=self.folder_path, width=30).grid(row=2, column=1)
-        tk.Button(master, text="Browse", command=self.browse_folder).grid(row=2, column=2)
+        # Destination Folder
+        tk.Label(master, text="Destination Folder").grid(row=2, column=0, sticky="w")
+        self.dest_folder_entry = tk.Entry(master, width=40)
+        self.dest_folder_entry.grid(row=2, column=1, pady=2)
+        tk.Button(master, text="Browse", command=self.browse_dest_folder).grid(row=2, column=2, padx=5)
 
-        # Financial year checkboxes
-        tk.Label(master, text="Select Financial Years").grid(row=3, column=0, sticky="ne")
-        self.years_vars = {}
-        years = ["2017-18", "2018-19", "2019-20", "2020-21", "2021-22", "2022-23", "2023-24", "2024-25"]
-        for i, year in enumerate(years):
+        # Chrome WebDriver Path
+        tk.Label(master, text="Chrome WebDriver Path").grid(row=3, column=0, sticky="w")
+        self.driver_path_entry = tk.Entry(master, width=40)
+        self.driver_path_entry.grid(row=3, column=1, pady=2)
+        tk.Button(master, text="Browse", command=self.browse_driver_path).grid(row=3, column=2, padx=5)
+
+        # FY Checkboxes
+        self.fy_vars = {}
+        fy_years = [
+            "2017-18", "2018-19", "2019-20", "2020-21",
+            "2021-22", "2022-23", "2023-24", "2024-25"
+        ]
+        tk.Label(master, text="Select FYs:").grid(row=4, column=0, sticky="w")
+        for i, fy in enumerate(fy_years):
             var = tk.BooleanVar()
-            chk = tk.Checkbutton(master, text=year, variable=var)
-            chk.grid(row=3 + i // 2, column=1 + (i % 2))
-            self.years_vars[year] = var
+            cb = tk.Checkbutton(master, text=fy, variable=var)
+            cb.grid(row=5 + i // 4, column=i % 4, sticky="w")
+            self.fy_vars[fy] = var
 
-        # Submit
+        # Submit Button
         tk.Button(master, text="Submit", command=self.submit).grid(row=8, column=1, pady=10)
 
-    def browse_folder(self):
+    def browse_dest_folder(self):
         folder = filedialog.askdirectory()
         if folder:
-            self.folder_path.set(folder)
+            self.dest_folder_entry.delete(0, tk.END)
+            self.dest_folder_entry.insert(0, folder)
+
+    def browse_driver_path(self):
+        path = filedialog.askopenfilename(filetypes=[("ChromeDriver", "*.exe")])
+        if path:
+            self.driver_path_entry.delete(0, tk.END)
+            self.driver_path_entry.insert(0, path)
 
     def submit(self):
-        username = self.username_entry.get().strip()
-        password = self.password_entry.get().strip()
-        folder = self.folder_path.get().strip()
-        years = [y for y, var in self.years_vars.items() if var.get()]
+        username = self.username_entry.get()
+        password = self.password_entry.get()
+        dest_folder = self.dest_folder_entry.get()
+        driver_path = self.driver_path_entry.get()
+        selected_fys = [fy for fy, var in self.fy_vars.items() if var.get()]
 
-        if not username or not password or not folder or not years:
-            messagebox.showerror("Error", "Please fill in all fields and select at least one financial year.")
+        if not username or not password or not dest_folder or not driver_path or not selected_fys:
+            messagebox.showerror("Error", "Please fill all fields and select at least one FY.")
             return
 
         self.master.destroy()
-        self.result = {
-            "username": username,
-            "password": password,
-            "folder": folder,
-            "years": years
+        run_gst_download(username, password, dest_folder, driver_path, selected_fys)
+
+# ================== Selenium Automation ================== #
+def run_gst_download(username, password, dest_folder, driver_path, selected_fys):
+    log_data = []
+    failed_docs = []
+    driver = None
+
+    try:
+        chrome_options = webdriver.ChromeOptions()
+        prefs = {
+            "download.default_directory": dest_folder,
+            "plugins.always_open_pdf_externally": True,
+            "download.prompt_for_download": False
         }
+        chrome_options.add_experimental_option("prefs", prefs)
+        chrome_options.add_argument("--start-maximized")
 
-# ---------------- Selenium Automation ----------------
-def gst_download(username, password, folder, years):
-    chrome_options = Options()
-    prefs = {"download.default_directory": folder, "plugins.always_open_pdf_externally": True}
-    chrome_options.add_experimental_option("prefs", prefs)
-    driver = webdriver.Chrome(options=chrome_options)
+        service = Service(driver_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
 
-    # Login
-    driver.get("https://services.gst.gov.in/services/login")
-    wait_for_page_load(driver, folder, "Login", "Login Page Load")
-    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "username"))).send_keys(username)
-    driver.find_element(By.ID, "user_pass").send_keys(password)
+        driver.get("https://services.gst.gov.in/services/login")
 
-    print("Please enter captcha manually and log in...")
-    WebDriverWait(driver, 120).until(EC.url_contains("dashboard"))
-    wait_for_page_load(driver, folder, "Login", "Dashboard Loaded")
+        # Login
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "username"))).send_keys(username)
+        driver.find_element(By.ID, "user_pass").send_keys(password)
+        driver.find_element(By.ID, "loginBtn").click()
 
-    for fy in years:
-        print(f"Processing year: {fy}")
+        # Loop through selected FYs
+        for fy in selected_fys:
+            try:
+                # === GSTR-1 Annual Download ===
+                WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.XPATH, "//button[@data-ng-click='getPdfData_gstr1()']"))).click()
+                log_data.append({"FY": fy, "Month": "", "Document": "GSTR-1 Annual", "Path": dest_folder})
 
-        # ---------------- MONTHLY GSTR-1 ----------------
-        driver.get("https://return.gst.gov.in/returns/auth/dashboard")
-        wait_for_page_load(driver, folder, fy, "GSTR-1 Dashboard Loaded")
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "financialYear"))).send_keys(fy)
-        safe_click(driver, folder, fy, "Search GSTR-1", "//button[@id='searchButton']")
-        wait_for_page_load(driver, folder, fy, "GSTR-1 Search Results Loaded")
-        safe_click(driver, folder, fy, "View GSTR-1", "//button[contains(text(),'VIEW')]")
-        wait_for_page_load(driver, folder, fy, "GSTR-1 View Page Loaded")
-        safe_click(driver, folder, fy, "View Summary GSTR-1", "//span[contains(text(),'VIEW SUMMARY')]")
-        wait_for_page_load(driver, folder, fy, "GSTR-1 Summary Loaded")
-        safe_click(driver, folder, fy, "Download GSTR-1 PDF", "//span[contains(text(),'DOWNLOAD (PDF)')]")
+                # === GSTR-3B Annual Download ===
+                WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.XPATH, "//button[@data-ng-click='getPdfData_gstr3B()']"))).click()
+                log_data.append({"FY": fy, "Month": "", "Document": "GSTR-3B Annual", "Path": dest_folder})
 
-        # ---------------- MONTHLY GSTR-3B ----------------
-        driver.get("https://return.gst.gov.in/returns/auth/dashboard")
-        wait_for_page_load(driver, folder, fy, "GSTR-3B Dashboard Loaded")
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "financialYear"))).send_keys(fy)
-        safe_click(driver, folder, fy, "Search GSTR-3B", "//button[@id='searchButton']")
-        wait_for_page_load(driver, folder, fy, "GSTR-3B Search Results Loaded")
-        safe_click(driver, folder, fy, "Download GSTR-3B PDF", "//button[@data-ng-click='downloadGSTR3Bpdf()']")
+                # === GSTR-9 ===
+                WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.XPATH, "//button[@data-ng-click='page_rtp(x.return_ty,x.due_dt,x.status)']"))).click()
+                WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.XPATH, "//button[@data-ng-click='getPdfData_gstr9()']"))).click()
+                log_data.append({"FY": fy, "Month": "", "Document": "GSTR-9", "Path": dest_folder})
 
-        # ---------------- ANNUAL RETURN ----------------
-        driver.get("https://services.gst.gov.in/services/annualreturn")
-        wait_for_page_load(driver, folder, fy, "Annual Return Page Loaded")
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.NAME, "finyr")))
-        Select(driver.find_element(By.NAME, "finyr")).select_by_visible_text(fy)
-        safe_click(driver, folder, fy, "Search Annual Return", "//button[@type='submit' and contains(@class,'srchbtn')]")
-        wait_for_page_load(driver, folder, fy, "Annual Return Search Results Loaded")
+                # === GSTR-9C ===
+                WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.XPATH, "//button[@data-ng-click='offlinepath(x.return_ty,x.status)']"))).click()
+                WebDriverWait(driver, 30).until(EC.element_to_be_clickable((By.XPATH, "//button[@data-ng-click='generate9cpdf()']"))).click()
+                log_data.append({"FY": fy, "Month": "", "Document": "GSTR-9C", "Path": dest_folder})
 
-        # View GSTR-9 & Download PDFs
-        if safe_click(driver, folder, fy, "View GSTR-9", "//button[@data-ng-click='page_rtp(x.return_ty,x.due_dt,x.status)']"):
-            wait_for_page_load(driver, folder, fy, "GSTR-9 View Page Loaded")
-            safe_click(driver, folder, fy, "Download Annual GSTR-1 PDF", "//button[@data-ng-click='getPdfData_gstr1()']")
-            safe_click(driver, folder, fy, "Download Annual GSTR-3B PDF", "//button[@data-ng-click='getPdfData_gstr3B()']")
-            safe_click(driver, folder, fy, "Download GSTR-9 PDF", "//button[@data-ng-click='getPdfData_gstr9()']")
+            except Exception as e:
+                failed_docs.append({"FY": fy, "Month": "", "Document": "One or more"})
+                print(f"Failed for {fy}: {e}")
 
-        # ---------------- GSTR-9C ----------------
-        if safe_click(driver, folder, fy, "Click Download GSTR-9C Button", "//button[@data-ng-click='offlinepath(x.return_ty,x.status)']"):
-            old_url = driver.current_url
-            wait_for_url_change(driver, old_url, folder, fy, "Navigated to GSTR-9C Page")
-            wait_for_page_load(driver, folder, fy, "GSTR-9C Page Loaded")
-            safe_click(driver, folder, fy, "Download GSTR-9C PDF", "//button[@data-ng-click='generate9cpdf()']")
+    except Exception:
+        print("Error:", traceback.format_exc())
+    finally:
+        if driver:
+            driver.quit()
 
-    driver.quit()
+        # Save log to Excel
+        log_file_path = os.path.join(dest_folder, f"GST_Download_Log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        pd.DataFrame(log_data).to_excel(log_file_path, index=False)
 
-# ---------------- Main ----------------
+        # Show summary popup
+        root = tk.Tk()
+        root.withdraw()
+        if failed_docs:
+            fail_text = "\n".join([f"{f['FY']} - {f['Month']} - {f['Document']}" for f in failed_docs])
+            messagebox.showerror("Download Completed with Failures", f"Some documents failed:\n\n{fail_text}")
+        else:
+            messagebox.showinfo("Success", f"All documents downloaded successfully.\nLog saved at:\n{log_file_path}")
+
+# ================== Main ================== #
 if __name__ == "__main__":
     root = tk.Tk()
     app = GSTDownloaderGUI(root)
     root.mainloop()
-
-    if hasattr(app, "result"):
-        data = app.result
-        gst_download(data["username"], data["password"], data["folder"], data["years"])
